@@ -26,6 +26,10 @@ import os
 import tkinter as tk
 import tkinter.font as tkfont
 
+# Phiên bản composer — app.py kiểm tra lúc khởi động để phát hiện
+# trường hợp máy chỉ được copy đè app.py mà quên layout_composer.py
+COMPOSER_VERSION = "2.0"
+
 from PIL import Image, ImageTk
 
 # Các phương pháp tách nền (label hiển thị ↔ mã nội bộ)

@@ -15,7 +15,7 @@ import traceback
 import queue as queue_module
 
 # --- APP INFO ---
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.5"
 APP_NAME = "Chosen One - Batch Render Engine"
 GITHUB_REPO = "javitkzas-cell/tool-xuat-video-hang-loat"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/chosen-one")
 UPDATE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -108,12 +108,18 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
-# --- TRÌNH KÉO-THẢ BỐ CỤC (chế độ Ken Burns) ---
+# --- TRÌNH KÉO-THẢ BỐ CỤC (dùng chung cho CẢ 2 mode) ---
+REQUIRED_COMPOSER_VERSION = "2.0"   # phải khớp COMPOSER_VERSION trong layout_composer.py
 try:
     from layout_composer import LayoutComposer
+    try:
+        from layout_composer import COMPOSER_VERSION as _COMPOSER_VER
+    except ImportError:
+        _COMPOSER_VER = "cũ (trước 2.0)"
     COMPOSER_AVAILABLE = True
 except Exception as _comp_err:
     LayoutComposer = None
+    _COMPOSER_VER = None
     COMPOSER_AVAILABLE = False
     logging.warning(f"layout_composer không nạp được: {_comp_err}")
 
@@ -817,6 +823,17 @@ class VideoGeneratorApp(ctk.CTk):
                 except Exception:
                     self.log(f"⚠️ Không tạo được {fpath}")
         
+        # Check layout_composer.py có ĐÚNG BỘ với app.py không (copy tay hay bị sót file)
+        if COMPOSER_AVAILABLE and _COMPOSER_VER != REQUIRED_COMPOSER_VERSION:
+            self.log(f"⚠ layout_composer.py là BẢN CŨ ({_COMPOSER_VER}) — cần bản {REQUIRED_COMPOSER_VERSION}!")
+            self.after(800, lambda: messagebox.showwarning(
+                "File không đồng bộ",
+                f"app.py là v{APP_VERSION} nhưng layout_composer.py là bản CŨ.\n\n"
+                "Đây là lý do các tính năng mới của trình kéo-thả\n"
+                "(8 ô chỉnh kích thước, thêm không tách nền...) không xuất hiện.\n\n"
+                "→ Copy đè file layout_composer.py MỚI từ máy chính sang\n"
+                "   (hoặc copy cả gói từ 1_DONG_GOI_MANG_DI.bat)."))
+
         # Check for updates (background)
         threading.Thread(target=self._bg_check_update, daemon=True).start()
 
@@ -2960,7 +2977,7 @@ class VideoGeneratorApp(ctk.CTk):
             subprocess.run(
                 [get_ffmpeg(), '-y', '-ss', str(t), '-i', video_path,
                  '-frames:v', '1', out, '-loglevel', 'error'],
-                creationflags=0x08000000, timeout=25)
+                creationflags=0x08000000, timeout=8)   # file hỏng → bỏ qua sau 8s, không treo UI lâu
             if os.path.exists(out):
                 return Image.open(out).convert('RGB')
         except Exception as e:
