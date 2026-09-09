@@ -17,7 +17,7 @@ import queue as queue_module
 # --- APP INFO ---
 APP_VERSION = "1.7.1"
 APP_NAME = "Chosen One - Batch Render Engine"
-GITHUB_REPO = "YOUR_USER/YOUR_REPO"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/chosen-one")
+GITHUB_REPO = "javitkzas-cell/tool-xuat-video-hang-loat"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/chosen-one")
 UPDATE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 # Các file CODE được thay khi tự cập nhật — KHÔNG đụng venv/user_settings.json/
 # bgm/overlay/models/ffmpeg/output... (dữ liệu riêng của từng máy giữ nguyên)
