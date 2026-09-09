@@ -1,0 +1,51 @@
+==================================================================
+   CHẠY TOOL XUẤT PHỤ ĐỀ TRÊN MÁY MỚI  (chỉ cần subtitle_tool.py)
+==================================================================
+
+CẦN COPY SANG MÁY MỚI (3 thứ, cùng 1 thư mục):
+  1. subtitle_tool.py            ← file tool
+  2. requirements-subtitle.txt   ← danh sách thư viện
+  3. thư mục  ffmpeg\  (chứa ffmpeg.exe, ffprobe.exe)   ← để đọc audio
+  (Tùy chọn) thư mục  models\  (base.pt, tiny.pt) ← để chạy OFFLINE, khỏi tải model
+
+------------------------------------------------------------------
+CÀI 1 LẦN TRÊN MÁY MỚI:
+------------------------------------------------------------------
+
+BƯỚC 1 — Cài Python
+  - Tải Python 3.11 (64-bit) tại: https://www.python.org/downloads/
+    (3.10 cũng được. ĐỪNG dùng 3.13 trở lên — thiếu thư viện.)
+  - Khi cài, TÍCH ô "Add python.exe to PATH".
+
+BƯỚC 2 — Cài thư viện
+  - Mở PowerShell/CMD, đi tới thư mục chứa subtitle_tool.py:
+        cd "đường\dẫn\tới\thư mục"
+  - (Khuyến nghị, cho gọn) tạo môi trường riêng:
+        python -m venv venv
+        venv\Scripts\activate
+  - Cài:
+        pip install -r requirements-subtitle.txt
+    (Lần đầu tải ~500MB torch + vài gói, hơi lâu — chỉ 1 lần.)
+
+BƯỚC 3 — FFmpeg
+  - Cách dễ nhất: copy thư mục "ffmpeg" (có ffmpeg.exe) đặt CẠNH subtitle_tool.py.
+    Tool tự tìm và dùng. XONG.
+  - (Hoặc) cài ffmpeg toàn máy:  winget install Gyan.FFmpeg
+
+------------------------------------------------------------------
+CHẠY TOOL:
+------------------------------------------------------------------
+  - Nếu đã tạo venv:  venv\Scripts\activate   rồi:  python subtitle_tool.py
+  - Nếu không:        python subtitle_tool.py
+
+  Lần chạy đầu, nếu KHÔNG copy thư mục models\ thì tool sẽ tự tải model
+  (base ~145MB, cần internet 1 lần). Copy sẵn models\ thì chạy offline luôn.
+
+------------------------------------------------------------------
+TÓM TẮT LỆNH (copy dán):
+------------------------------------------------------------------
+  cd "thư mục chứa file"
+  python -m venv venv
+  venv\Scripts\activate
+  pip install -r requirements-subtitle.txt
+  python subtitle_tool.py

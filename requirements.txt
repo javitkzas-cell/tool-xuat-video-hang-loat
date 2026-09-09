@@ -1,0 +1,28 @@
+# ============================================================
+# THU VIEN CHO TOOL CHOSEN (app.py - tao video tu anh/video)
+# Cai:  python -m pip install -r requirements.txt
+# Yeu cau: Python 3.10 / 3.11 / 3.12 (64-bit). KHONG dung 3.13+.
+# KHONG ghim version -> pip tu chon ban hop voi Python dang dung.
+# ============================================================
+
+# --- Giao dien ---
+customtkinter
+
+# --- Xu ly anh/video ---
+numpy<2
+opencv-python
+Pillow
+
+# --- Phu de AI (Whisper) ---
+stable-ts
+openai-whisper
+numba
+tiktoken
+
+# --- AI engine (ban CPU mac dinh tren Windows, ~500MB-2GB tai lan dau) ---
+torch
+
+# --- TUY CHON: tach nen AI (rembg). Duoc cai rieng o buoc 4 cua
+#     2_CAI_DAT_MAY_MOI.bat de neu loi cung KHONG chan cai dat chinh.
+# rembg
+# onnxruntime
