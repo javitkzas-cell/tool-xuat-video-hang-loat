@@ -15,9 +15,9 @@ import traceback
 import queue as queue_module
 
 # --- APP INFO ---
-APP_VERSION = "1.7.5"
-APP_NAME = "Chosen One - Batch Render Engine"
-GITHUB_REPO = "javitkzas-cell/tool-xuat-video-hang-loat"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/chosen-one")
+APP_VERSION = "1.8.3"
+APP_NAME = "Vạn Phẩm - Batch Render Engine"
+GITHUB_REPO = "javitkzas-cell/tool-xuat-video-hang-loat"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/van-pham")
 UPDATE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 # Các file CODE được thay khi tự cập nhật — KHÔNG đụng venv/user_settings.json/
 # bgm/overlay/models/ffmpeg/output... (dữ liệu riêng của từng máy giữ nguyên)
@@ -25,6 +25,7 @@ UPDATE_CODE_FILES = [
     'app.py', 'layout_composer.py', 'debug_logger.py', 'subtitle_tool.py',
     'requirements.txt', 'run.bat', 'run_subtitle.bat',
     '2_CAI_DAT_MAY_MOI.bat', 'HUONG_DAN_CAI_DAT_MAY_MOI.txt',
+    'icon.ico', 'TAO_SHORTCUT.bat',
 ]
 
 # --- LIỀU THUỐC TRỊ LỖI NONETYPE KHI ẨN MÀN HÌNH ĐEN ---
@@ -159,6 +160,14 @@ class VideoGeneratorApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} v{APP_VERSION}")
+        # Icon cửa sổ + taskbar (icon.ico cạnh app.py)
+        try:
+            _ico = os.path.join(APP_DIR, 'icon.ico')
+            if os.path.exists(_ico):
+                self.iconbitmap(_ico)
+                self.after(700, lambda: self.iconbitmap(_ico))  # CTk hay reset → đặt lại
+        except Exception:
+            pass
         self.geometry("1700x900")   # kích thước khi user bấm "khôi phục" (restore)
         self.resizable(True, True)
         self.minsize(1100, 600)
@@ -287,7 +296,7 @@ class VideoGeneratorApp(ctk.CTk):
         title_frame.grid(row=0, column=0, pady=10, sticky="ew")
         title_frame.grid_columnconfigure(0, weight=1)
         
-        title_label = ctk.CTkLabel(title_frame, text="🎬 CHOSEN ONE - BATCH RENDER ENGINE", font=ctk.CTkFont(size=24, weight="bold"))
+        title_label = ctk.CTkLabel(title_frame, text="🎬 VẠN PHẨM - BATCH RENDER ENGINE", font=ctk.CTkFont(size=24, weight="bold"))
         title_label.grid(row=0, column=0)
         
         # Version + Update
@@ -845,11 +854,41 @@ class VideoGeneratorApp(ctk.CTk):
         except Exception:
             return (0,)
 
+    def _open_url(self, url, timeout=10):
+        """Mở URL với xác thực SSL đáng tin cậy.
+        Máy Windows cũ hay thiếu chứng chỉ gốc → CERTIFICATE_VERIFY_FAILED.
+        Thứ tự thử: (0) bỏ xác thực nếu user đã đồng ý → (1) bộ cert certifi
+        đi kèm venv → (2) cert hệ thống Windows."""
+        import urllib.request, urllib.error, ssl
+        req = urllib.request.Request(url, headers={'User-Agent': 'VanPham-App'})
+        ctxs = []
+        if getattr(self, '_ssl_skip_verify', False):
+            _u = ssl.create_default_context()
+            _u.check_hostname = False
+            _u.verify_mode = ssl.CERT_NONE
+            ctxs.append(_u)
+        try:
+            import certifi
+            ctxs.append(ssl.create_default_context(cafile=certifi.where()))
+        except Exception:
+            pass
+        ctxs.append(ssl.create_default_context())
+        last_err = None
+        for ctx in ctxs:
+            try:
+                return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+            except (ssl.SSLError, urllib.error.URLError) as e:
+                _reason = getattr(e, 'reason', e)
+                if isinstance(e, ssl.SSLError) or isinstance(_reason, ssl.SSLError):
+                    last_err = e
+                    continue
+                raise
+        raise last_err
+
     def _fetch_latest_release(self, timeout=10):
         """Gọi GitHub API lấy release mới nhất. Trả về dict hoặc raise."""
-        import urllib.request, json
-        req = urllib.request.Request(UPDATE_URL, headers={'User-Agent': 'ChosenOne-App'})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        import json
+        with self._open_url(UPDATE_URL, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
 
     def _bg_check_update(self):
@@ -879,7 +918,7 @@ class VideoGeneratorApp(ctk.CTk):
                 "Tính năng tự cập nhật cần 1 repo GitHub.\n\n"
                 "Mở file app.py, sửa dòng gần đầu file:\n"
                 '    GITHUB_REPO = "YOUR_USER/YOUR_REPO"\n'
-                "thành repo của bạn (vd \"minhchinh/chosen-one\").\n\n"
+                "thành repo của bạn (vd \"minhchinh/van-pham\").\n\n"
                 "Xem hướng dẫn đầy đủ trong file HUONG_DAN_CAP_NHAT_GITHUB.txt")
             return
         if getattr(self, '_pending_update', None):
@@ -914,9 +953,30 @@ class VideoGeneratorApp(ctk.CTk):
                             messagebox.showinfo("Cập nhật", f"Bạn đang dùng phiên bản mới nhất (v{APP_VERSION})!")
                         ))
                 except Exception as e:
-                    self.after(0, lambda: (
+                    # PHẢI chốt lỗi vào biến mặc định của lambda: Python xóa `e`
+                    # khi hết except → lambda chạy sau sẽ NameError im lặng.
+                    _msg = f"{type(e).__name__}: {e}"
+                    if 'CERTIFICATE_VERIFY_FAILED' in _msg:
+                        def _ask_skip_ssl():
+                            self.btn_update.configure(text="🔄", text_color="gray")
+                            if messagebox.askyesno("Lỗi chứng chỉ SSL",
+                                    "Máy này không xác thực được chứng chỉ SSL của GitHub\n"
+                                    "(Windows thiếu/cũ chứng chỉ gốc, hoặc diệt virus chen vào).\n\n"
+                                    "CÁCH CHỮA TỐT NHẤT (an toàn):\n"
+                                    "  • Chạy Windows Update rồi khởi động lại máy, HOẶC\n"
+                                    "  • Chạy lại 2_CAI_DAT_MAY_MOI.bat để cài thêm certifi\n\n"
+                                    "Hoặc TẠM THỜI bỏ qua xác thực SSL và thử lại ngay?\n"
+                                    "(kém an toàn hơn — chỉ áp dụng cho phiên này)"):
+                                self._ssl_skip_verify = True
+                                self.check_for_updates()
+                        self.after(0, _ask_skip_ssl)
+                        return
+                    self.after(0, lambda m=_msg: (
                         self.btn_update.configure(text="🔄", text_color="gray"),
-                        messagebox.showwarning("Lỗi", f"Không thể kiểm tra cập nhật.\n{e}")
+                        messagebox.showwarning("Lỗi",
+                            f"Không thể kiểm tra cập nhật.\n{m}\n\n"
+                            f"Máy này có thể không ra được internet tới github.com\n"
+                            f"(kiểm tra mạng / tường lửa / phần mềm diệt virus).")
                     ))
             threading.Thread(target=_check, daemon=True).start()
 
@@ -928,12 +988,11 @@ class VideoGeneratorApp(ctk.CTk):
            (CHỈ thay file trong UPDATE_CODE_FILES — venv/cài đặt/dữ liệu giữ nguyên)
         4. requirements.txt đổi → tự pip install thư viện mới
         5. Khởi động lại tool"""
-        import urllib.request, zipfile, shutil
+        import zipfile, shutil, re as _re
         try:
             self.log(f"🔄 Đang tải bản cập nhật v{version}...")
             zpath = os.path.join(TEMP_DIR, f"update_v{version}.zip")
-            req = urllib.request.Request(zip_url, headers={'User-Agent': 'ChosenOne-App'})
-            with urllib.request.urlopen(req, timeout=120) as resp, open(zpath, 'wb') as f:
+            with self._open_url(zip_url, timeout=120) as resp, open(zpath, 'wb') as f:
                 shutil.copyfileobj(resp, f)
 
             exdir = os.path.join(TEMP_DIR, f"update_v{version}")
@@ -947,6 +1006,32 @@ class VideoGeneratorApp(ctk.CTk):
             src_root = roots[0] if roots else exdir
             if not os.path.isfile(os.path.join(src_root, 'app.py')):
                 raise RuntimeError("Gói cập nhật không có app.py — kiểm tra lại repo/release.")
+
+            # ===== KHÓA CHỐNG HẠ CẤP =====
+            # Đọc APP_VERSION THẬT trong app.py của gói tải về. Nếu KHÔNG mới hơn
+            # bản đang chạy → TỪ CHỐI thay (tránh tai nạn: GitHub lỡ còn code cũ,
+            # tag mới nhưng file cũ → tự cập nhật ngược phá mất bản mới trên máy).
+            try:
+                with open(os.path.join(src_root, 'app.py'), encoding='utf-8') as _af:
+                    _head = _af.read(4000)
+                _m = _re.search(r'APP_VERSION\s*=\s*["\']([\d.]+)["\']', _head)
+                _pkg_ver = _m.group(1) if _m else '0'
+            except Exception:
+                _pkg_ver = '0'
+            if self._ver_tuple(_pkg_ver) <= self._ver_tuple(APP_VERSION):
+                shutil.rmtree(exdir, ignore_errors=True)
+                try: os.remove(zpath)
+                except Exception: pass
+                _cur = APP_VERSION
+                self.after(0, lambda pv=_pkg_ver, cur=_cur: (
+                    self.btn_update.configure(text="🔄", text_color="gray"),
+                    messagebox.showwarning("Bỏ qua cập nhật",
+                        f"Gói trên GitHub là code v{pv}, KHÔNG mới hơn bản đang chạy v{cur}.\n\n"
+                        f"Đã BỎ QUA để không ghi đè bản mới bằng bản cũ.\n\n"
+                        f"Nếu bạn vừa sửa code: hãy UPLOAD file mới lên GitHub TRƯỚC,\n"
+                        f"rồi mới tạo Release/tag (tag tạo trước khi upload sẽ chứa code cũ).")))
+                self.log(f"⛔ Bỏ qua cập nhật: gói v{_pkg_ver} không mới hơn v{APP_VERSION}.")
+                return
 
             # So sánh requirements trước khi ghi đè
             req_old = req_new = ''
@@ -1014,10 +1099,11 @@ class VideoGeneratorApp(ctk.CTk):
             self.after(0, _restart)
         except Exception as e:
             self.log(f"❌ Cập nhật thất bại: {e}")
-            self.after(0, lambda: (
+            _msg = f"{type(e).__name__}: {e}"   # chốt lỗi trước khi hết khối except
+            self.after(0, lambda m=_msg: (
                 self.btn_update.configure(text="🔴", text_color="#e74c3c"),
                 messagebox.showwarning("Lỗi cập nhật",
-                    f"Không cập nhật được:\n{e}\n\nTool vẫn chạy bản hiện tại bình thường.")))
+                    f"Không cập nhật được:\n{m}\n\nTool vẫn chạy bản hiện tại bình thường.")))
 
     # ============================================================
     # LƯU / KHÔI PHỤC CÀI ĐẶT NGƯỜI DÙNG (user_settings.json)
@@ -2172,7 +2258,7 @@ class VideoGeneratorApp(ctk.CTk):
             return
         try:
             # Cho user chọn nơi lưu
-            default_name = f"chosen_one_debug_{int(time.time())}.zip"
+            default_name = f"van_pham_debug_{int(time.time())}.zip"
             target = filedialog.asksaveasfilename(
                 title="Lưu Debug Bundle",
                 defaultextension=".zip",

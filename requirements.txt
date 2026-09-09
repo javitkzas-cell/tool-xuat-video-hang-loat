@@ -8,6 +8,9 @@
 # --- Giao dien ---
 customtkinter
 
+# --- Chung chi SSL (cho tu-cap-nhat GitHub tren may Windows thieu cert goc) ---
+certifi
+
 # --- Xu ly anh/video ---
 numpy<2
 opencv-python
