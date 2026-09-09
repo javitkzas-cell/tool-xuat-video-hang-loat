@@ -28,7 +28,7 @@ import tkinter.font as tkfont
 
 # Phiên bản composer — app.py kiểm tra lúc khởi động để phát hiện
 # trường hợp máy chỉ được copy đè app.py mà quên layout_composer.py
-COMPOSER_VERSION = "2.0"
+COMPOSER_VERSION = "2.1"
 
 from PIL import Image, ImageTk
 
@@ -192,7 +192,7 @@ class LayoutComposer:
                 return l
         return None
 
-    def _get_thumb(self, layer):
+    def _get_thumb(self, layer, fast=False):
         cw_px = max(8, int(layer['w'] * self.cw))
         ch_px = max(8, int(layer['h'] * self.ch))
         if layer.get('type') == 'waveform':
@@ -203,10 +203,36 @@ class LayoutComposer:
         if base is None:
             base = self._build_keyed_pil(layer)
             self._thumb_cache[sig] = base
+        # Cache ảnh ĐÃ SCALE theo (sig, kích thước px, chế độ resample) → kéo/di
+        # chuyển KHÔNG đổi kích thước sẽ trúng cache, khỏi resize lại mỗi frame.
+        scache = getattr(self, '_scaled_cache', None)
+        if scache is None:
+            scache = self._scaled_cache = {}
+        rk = (sig, cw_px, ch_px, fast)
+        cached = scache.get(rk)
+        if cached is not None:
+            return cached
+        flt = Image.BILINEAR if fast else Image.LANCZOS   # kéo = nhanh, thả = nét
         try:
-            return base.resize((cw_px, ch_px), Image.LANCZOS)
+            out = base.resize((cw_px, ch_px), flt)
         except Exception:
-            return base.resize((cw_px, ch_px))
+            out = base.resize((cw_px, ch_px))
+        # Giới hạn cache (tránh phình khi kéo resize qua nhiều cỡ)
+        if len(scache) > 40:
+            scache.clear()
+        scache[rk] = out
+        return out
+
+    def _invalidate_scaled(self, layer=None):
+        """Xóa cache ảnh đã scale (khi đổi ảnh/tách nền)."""
+        sc = getattr(self, '_scaled_cache', None)
+        if sc is None:
+            return
+        if layer is None:
+            sc.clear()
+        else:
+            for k in [k for k in sc if k[0][0] == layer['id']]:
+                sc.pop(k, None)
 
     def _build_keyed_pil(self, layer):
         try:
@@ -260,6 +286,7 @@ class LayoutComposer:
         for k in list(self._thumb_cache.keys()):
             if k and k[0] == layer['id']:
                 del self._thumb_cache[k]
+        self._invalidate_scaled(layer)
 
     # ============================================================ RESIZE
     def resize(self, cw, ch):
@@ -323,29 +350,56 @@ class LayoutComposer:
     def render_all(self):
         c = self.canvas
         c.delete('all')
+        # Giữ lại PhotoImage nền/phụ đề (tốn kém khi tạo) — chỉ tạo mới khi đổi
+        _keep = {k: v for k, v in self.refs.items()
+                 if k in ('bg', 'subov', '_bg_id', '_sub_id')}
         self.refs.clear()
+        self.refs.update(_keep)
 
-        self.refs['bg'] = ImageTk.PhotoImage(self._bg_pil)
+        # Nền: chỉ encode lại PhotoImage khi ảnh nền thực sự đổi
+        if self.refs.get('_bg_id') != id(self._bg_pil) or 'bg' not in self.refs:
+            self.refs['bg'] = ImageTk.PhotoImage(self._bg_pil)
+            self.refs['_bg_id'] = id(self._bg_pil)
         c.create_image(0, 0, anchor='nw', image=self.refs['bg'], tags=('bgimg',))
 
+        _fast = self._drag.get('mode') is not None   # đang kéo → resample nhanh
         for layer in self.app.overlay_layers:
-            self._draw_layer(layer)
+            self._draw_layer(layer, fast=_fast)
 
-        # Lớp phụ đề ASS live (nếu có) — trên layer, dưới khung chọn/kéo-thả
+        # Lớp phụ đề ASS live: chỉ encode lại khi đổi
         if self._sub_pil is not None:
-            self.refs['subov'] = ImageTk.PhotoImage(self._sub_pil)
+            if self.refs.get('_sub_id') != id(self._sub_pil) or 'subov' not in self.refs:
+                self.refs['subov'] = ImageTk.PhotoImage(self._sub_pil)
+                self.refs['_sub_id'] = id(self._sub_pil)
             c.create_image(0, 0, anchor='nw', image=self.refs['subov'], tags=('subov',))
+        else:
+            self.refs.pop('subov', None); self.refs.pop('_sub_id', None)
 
         self._draw_text_box()
         self._draw_selection()
+        self._draw_center_guides()
 
-    def _draw_layer(self, layer):
+    def _draw_center_guides(self):
+        """Đường canh giữa màn hình (dọc + ngang) — chỉ hiện khi khung text đang
+        được hít vào chính giữa, giúp căn khung nằm giữa màn hình."""
+        g = getattr(self, '_active_guides', None)
+        if not g:
+            return
+        c = self.canvas
+        cx, cy = self.cw / 2, self.ch / 2
+        if g[0]:   # đường DỌC (canh giữa chiều ngang)
+            c.create_line(cx, 0, cx, self.ch, fill='#00e5ff', width=1, dash=(6, 4), tags=('guide',))
+        if g[1]:   # đường NGANG (canh giữa chiều cao)
+            c.create_line(0, cy, self.cw, cy, fill='#00e5ff', width=1, dash=(6, 4), tags=('guide',))
+
+    def _draw_layer(self, layer, fast=False):
         c = self.canvas
         try:
             op = layer.get('opacity', 1.0)
-            pil = self._get_thumb(layer)
+            pil = self._get_thumb(layer, fast=fast)
             if op < 0.99:
                 a = pil.split()[3].point(lambda v: int(v * op))
+                pil = pil.copy()          # không sửa ảnh trong cache
                 pil.putalpha(a)
             tkimg = ImageTk.PhotoImage(pil)
             self.refs[layer['id']] = tkimg
@@ -559,8 +613,21 @@ class LayoutComposer:
             layer['x'], layer['y'], layer['w'], layer['h'] = nx, ny, nw, nh
         elif m == 'move_text':
             tl = self.app.kb_text_layout
-            tl['x'] = self._clamp((e.x - self._drag['ox']) / self.cw, 0.0, 1.0 - tl['w'])
-            tl['y'] = self._clamp((e.y - self._drag['oy']) / self.ch, 0.0, 1.0 - tl['h'])
+            nx = self._clamp((e.x - self._drag['ox']) / self.cw, 0.0, 1.0 - tl['w'])
+            ny = self._clamp((e.y - self._drag['oy']) / self.ch, 0.0, 1.0 - tl['h'])
+            # HÍT vào giữa màn hình: nếu TÂM khung gần chính giữa (±2.2%) → dính +
+            # hiện đường canh. Xét theo tâm để khung nằm chính giữa màn hình.
+            SNAP = 0.022
+            self._active_guides = [False, False]   # [dọc, ngang]
+            _cx = nx + tl['w'] / 2.0
+            _cy = ny + tl['h'] / 2.0
+            if abs(_cx - 0.5) <= SNAP:
+                nx = 0.5 - tl['w'] / 2.0
+                self._active_guides[0] = True
+            if abs(_cy - 0.5) <= SNAP:
+                ny = 0.5 - tl['h'] / 2.0
+                self._active_guides[1] = True
+            tl['x'], tl['y'] = nx, ny
             tl['enabled'] = True
         elif m == 'resize_text':
             tl = self.app.kb_text_layout
@@ -585,6 +652,8 @@ class LayoutComposer:
     def _on_release(self, e):
         if self._drag['mode']:
             self._drag['mode'] = None
+            self._active_guides = None   # ẩn đường canh giữa khi thả tay
+            self.render_all()
             self._notify_change()
 
     def _nudge(self, dx, dy):

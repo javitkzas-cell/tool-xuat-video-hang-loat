@@ -15,7 +15,7 @@ import traceback
 import queue as queue_module
 
 # --- APP INFO ---
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.9.0"
 APP_NAME = "Vạn Phẩm - Batch Render Engine"
 GITHUB_REPO = "javitkzas-cell/tool-xuat-video-hang-loat"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/van-pham")
 UPDATE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -25,8 +25,17 @@ UPDATE_CODE_FILES = [
     'app.py', 'layout_composer.py', 'debug_logger.py', 'subtitle_tool.py',
     'requirements.txt', 'run.bat', 'run_subtitle.bat',
     '2_CAI_DAT_MAY_MOI.bat', 'HUONG_DAN_CAI_DAT_MAY_MOI.txt',
-    'icon.ico', 'TAO_SHORTCUT.bat',
+    'icon.ico', 'TAO_SHORTCUT.bat', 'HUONG_DAN_BAO_LOI_DISCORD.txt',
 ]
+# --- BÁO LỖI TỪ XA (Discord webhook) ---
+# Dán link webhook Discord của bạn vào đây → mọi máy khác gặp lỗi sẽ tự gửi
+# báo cáo (phiên bản, tên máy, traceback) về kênh Discord để bạn đọc & sửa ngay.
+# Cách lấy: Discord → Server Settings → Integrations → Webhooks → New Webhook →
+# Copy Webhook URL. (Xem HUONG_DAN_BAO_LOI_DISCORD.txt)
+DISCORD_WEBHOOK_URL = ""
+# Nếu thư mục tool có file tên "DAY_LA_MAY_DEV.txt" → KHÔNG gửi lỗi (máy của bạn
+# tự sửa được, khỏi tự spam chính mình). Đặt file này trên (các) máy của bạn.
+DEV_MACHINE_MARKER = "DAY_LA_MAY_DEV.txt"
 
 # --- LIỀU THUỐC TRỊ LỖI NONETYPE KHI ẨN MÀN HÌNH ĐEN ---
 if sys.stdout is None:
@@ -110,7 +119,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 # --- TRÌNH KÉO-THẢ BỐ CỤC (dùng chung cho CẢ 2 mode) ---
-REQUIRED_COMPOSER_VERSION = "2.0"   # phải khớp COMPOSER_VERSION trong layout_composer.py
+REQUIRED_COMPOSER_VERSION = "2.1"   # phải khớp COMPOSER_VERSION trong layout_composer.py
 try:
     from layout_composer import LayoutComposer
     try:
@@ -158,14 +167,34 @@ ctk.set_default_color_theme("blue")
 
 class VideoGeneratorApp(ctk.CTk):
     def __init__(self):
+        # Khai báo AppUserModelID RIÊNG → Windows tách khỏi pythonw.exe và
+        # dùng icon cửa sổ cho taskbar (thiếu bước này taskbar hiện icon Python).
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("VanPham.BatchRender")
+        except Exception:
+            pass
         super().__init__()
         self.title(f"{APP_NAME} v{APP_VERSION}")
+        # Bắt MỌI lỗi callback của Tkinter → log + gửi báo cáo về Discord
+        try:
+            self.report_callback_exception = self._on_tk_exception
+        except Exception:
+            pass
         # Icon cửa sổ + taskbar (icon.ico cạnh app.py)
         try:
             _ico = os.path.join(APP_DIR, 'icon.ico')
             if os.path.exists(_ico):
                 self.iconbitmap(_ico)
-                self.after(700, lambda: self.iconbitmap(_ico))  # CTk hay reset → đặt lại
+                # iconphoto giúp 1 số bản Windows lấy đúng icon cho taskbar
+                try:
+                    from PIL import Image, ImageTk
+                    self._taskbar_icon_img = ImageTk.PhotoImage(Image.open(_ico))
+                    self.iconphoto(True, self._taskbar_icon_img)
+                except Exception:
+                    pass
+                self.after(700, lambda: self.iconbitmap(_ico))   # CTk hay reset → đặt lại
+                self.after(1500, lambda: self.iconbitmap(_ico))
         except Exception:
             pass
         self.geometry("1700x900")   # kích thước khi user bấm "khôi phục" (restore)
@@ -890,6 +919,88 @@ class VideoGeneratorApp(ctk.CTk):
         import json
         with self._open_url(UPDATE_URL, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
+
+    # ============================================================
+    # BÁO LỖI TỪ XA — mọi máy gặp lỗi tự gửi báo cáo về Discord của dev
+    # ============================================================
+    def _on_tk_exception(self, exc, val, tb):
+        """Handler cho mọi lỗi callback Tkinter (nút bấm, sự kiện...)."""
+        import traceback as _tb
+        tb_text = "".join(_tb.format_exception(exc, val, tb))
+        try:
+            self.log(f"❌ Lỗi: {getattr(exc, '__name__', exc)}: {val}")
+        except Exception:
+            pass
+        self._report_error_remote(f"{getattr(exc, '__name__', 'Error')}: {val}",
+                                  str(val), tb_text)
+
+    def _report_error_remote(self, title, err_text, tb_text="", context=""):
+        """Gửi báo cáo lỗi về Discord webhook (chạy nền, không chặn UI).
+        Tự bỏ qua nếu: chưa cấu hình webhook, hoặc máy có file DEV_MACHINE_MARKER,
+        hoặc lỗi trùng đã gửi trong phiên (chống spam)."""
+        try:
+            if not DISCORD_WEBHOOK_URL or 'discord.com' not in DISCORD_WEBHOOK_URL:
+                return
+            if os.path.exists(os.path.join(APP_DIR, DEV_MACHINE_MARKER)):
+                return
+            # Chống spam: mỗi chữ ký lỗi chỉ gửi 1 lần/phiên, tối đa 8 lỗi/phiên
+            sig = f"{title}|{err_text}"[:200]
+            sent = getattr(self, '_err_sent', None)
+            if sent is None:
+                sent = self._err_sent = set()
+            if sig in sent or len(sent) >= 8:
+                return
+            sent.add(sig)
+            threading.Thread(target=self._do_report_error_remote,
+                             args=(title, err_text, tb_text, context), daemon=True).start()
+        except Exception:
+            pass
+
+    def _do_report_error_remote(self, title, err_text, tb_text, context):
+        import json, platform, socket, datetime, urllib.request, ssl
+        try:
+            try: machine = socket.gethostname()
+            except Exception: machine = "?"
+            when = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            osname = f"{platform.system()} {platform.release()}"
+            # Nội dung gọn (Discord tối đa 2000 ký tự/tin) — ưu tiên phần đuôi
+            # traceback vì đó là dòng lỗi thật.
+            body = (
+                f"🔴 **LỖI VẠN PHẨM** v{APP_VERSION}\n"
+                f"🖥 Máy: `{machine}`  |  {osname}  |  {when}\n"
+                f"⚠ **{title}**\n"
+                f"```\n{err_text[:300]}\n```"
+            )
+            tb = (tb_text or "").strip()
+            if tb:
+                _room = 1850 - len(body)
+                if _room > 200:
+                    body += f"```\n{tb[-_room:]}\n```"
+            if context:
+                body = body[:1900] + f"\n📌 {context[:80]}"
+            data = json.dumps({"content": body[:1990],
+                               "username": f"VanPham v{APP_VERSION}"}).encode('utf-8')
+            req = urllib.request.Request(
+                DISCORD_WEBHOOK_URL, data=data,
+                headers={'Content-Type': 'application/json', 'User-Agent': 'VanPham-App'})
+            # Dùng cùng cách xác thực SSL bền như _open_url
+            ctxs = []
+            try:
+                import certifi
+                ctxs.append(ssl.create_default_context(cafile=certifi.where()))
+            except Exception:
+                pass
+            ctxs.append(ssl.create_default_context())
+            for ctx in ctxs:
+                try:
+                    urllib.request.urlopen(req, timeout=15, context=ctx)
+                    break
+                except ssl.SSLError:
+                    continue
+                except Exception:
+                    break
+        except Exception:
+            pass
 
     def _bg_check_update(self):
         """Background check for updates on startup."""
@@ -2587,6 +2698,9 @@ class VideoGeneratorApp(ctk.CTk):
         self._pv_playing = not self._pv_playing
         if self._pv_playing:
             self._pv_clock = 0.0   # bấm phát → hiệu ứng chữ chạy lại từ đầu
+            # Dựng chuỗi ĐỘNG (nếu chưa có) để chữ chạy hiệu ứng khi phát
+            if self._pv_sub_frames is None and self.txt_file and os.path.exists(self.txt_file):
+                self._pv_rebuild_sub_async(static_only=False)
         self.btn_pv_play.configure(
             text="⏸ Dừng" if self._pv_playing else "▶ Phát",
             fg_color="#c0392b" if self._pv_playing else "#27ae60",
@@ -2787,23 +2901,31 @@ class VideoGeneratorApp(ctk.CTk):
         except Exception:
             return None
 
-    def _pv_rebuild_sub_async(self):
-        """Dựng lại lớp phụ đề ASS (chạy nền, ~0.3s). Gọi khi đổi font/cỡ/viền/kiểu."""
+    def _pv_rebuild_sub_async(self, static_only=None):
+        """Dựng lại lớp phụ đề ASS (chạy nền). Gọi khi đổi font/cỡ/viền/kiểu.
+        static_only=True → chỉ dựng 1 frame TĨNH (nhanh, dùng khi đang chỉnh/pause).
+        static_only=False → dựng cả chuỗi ĐỘNG 5s (khi phát). None → tự quyết
+        theo trạng thái phát."""
+        if static_only is None:
+            static_only = not self._pv_playing
         if self._pv_sub_building:
             self._pv_sub_dirty = True
+            self._pv_sub_dirty_static = static_only
             return
         self._pv_sub_building = True
         self._pv_sub_dirty = False
-        threading.Thread(target=self._pv_build_sub_overlay, daemon=True).start()
+        threading.Thread(target=self._pv_build_sub_overlay,
+                         kwargs={'static_only': static_only}, daemon=True).start()
 
     # Thông số chuỗi phụ đề ĐỘNG trên preview
     PV_SUB_FPS = 10       # fps lớp phụ đề (nhẹ, đủ mượt cho hiệu ứng chữ)
     PV_SUB_DUR = 5.0      # vòng lặp 5 giây
     PV_SUB_RW, PV_SUB_RH = 960, 540   # render 960x540 rồi scale lên preview
 
-    def _pv_build_sub_overlay(self):
-        """Render lớp phụ đề ASS THẬT (ĐÚNG KIỂU đang chọn, có hiệu ứng động) thành
-        CHUỖI FRAME RGBA 5 giây — player tua theo đồng hồ phát → chữ chạy live.
+    def _pv_build_sub_overlay(self, static_only=True):
+        """Render lớp phụ đề ASS THẬT (ĐÚNG KIỂU đang chọn) đè lên live preview.
+        static_only=True → chỉ 1 frame trạng thái đủ chữ (nhanh, khi đang chỉnh).
+        static_only=False → cả chuỗi 5s để chữ chạy hiệu ứng khi phát.
         Dùng đúng write_ass_subtitle của render nên khớp 100% kiểu chữ/hiệu ứng."""
         temp_ass = os.path.join(TEMP_DIR, "pv_sub.ass")
         try:
@@ -2842,7 +2964,7 @@ class VideoGeneratorApp(ctk.CTk):
             if kb_tb and kb_tb.get('enabled'):
                 self.write_ass_subtitle(dummy_scene, font_val, fontsize_val, outline_val,
                                         temp_ass, W, H, 'en', style_mode, layout='right_box',
-                                        text_box={'x': kb_tb['x'], 'y': kb_tb['y'], 'w': kb_tb['w']})
+                                        text_box={'x': kb_tb['x'], 'y': kb_tb['y'], 'w': kb_tb['w'], 'h': kb_tb.get('h')})
             else:
                 self.write_ass_subtitle(dummy_scene, font_val, fontsize_val, outline_val,
                                         temp_ass, W, H, 'en', style_mode)
@@ -2851,48 +2973,69 @@ class VideoGeneratorApp(ctk.CTk):
                                       outline_color=self.sub_outline_color,
                                       glow=self.sub_glow, plain=True)
             ass_escaped = self.escape_path_for_ffmpeg(temp_ass)
-            # Filter 'ass' KHÔNG ghi kênh alpha → render 2 CHUỖI (nền ĐEN + nền TRẮNG)
-            # rồi tách alpha từng frame:  A = 1-(trắng-đen)/255 ;  màu = đen/A
+            # Filter 'ass' KHÔNG ghi kênh alpha → render nền ĐEN + nền TRẮNG rồi
+            # tách alpha:  A = 1-(trắng-đen)/255 ;  màu = đen/A
             RW, RH, FPS_S = self.PV_SUB_RW, self.PV_SUB_RH, self.PV_SUB_FPS
-            _seqs = {}
-            for _nm, _col in (('b', 'black'), ('w', 'white')):
-                cmd = [get_ffmpeg(), '-y',
-                       '-f', 'lavfi', '-i', f'color=c={_col}:s={RW}x{RH}:r={FPS_S}:d={seg_dur}',
-                       '-vf', f"ass='{ass_escaped}'",
-                       '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
-                r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
-                if r.returncode == 0 and r.stdout:
-                    n = len(r.stdout) // (RW * RH * 3)
-                    if n > 0:
+            PW, PH = self._pv_res
+            _resample = Image.LANCZOS if static_only else Image.BILINEAR
+
+            if static_only:
+                # === 1 FRAME TĨNH: lấy đúng lúc CUỐI (đủ chữ hiện) — nhanh ===
+                _seqs = {}
+                for _nm, _col in (('b', 'black'), ('w', 'white')):
+                    cmd = [get_ffmpeg(), '-y',
+                           '-f', 'lavfi', '-i', f'color=c={_col}:s={RW}x{RH}:r=25:d={seg_dur}',
+                           '-ss', f'{max(seg_dur - 0.15, 0.1):.2f}',
+                           '-vf', f"ass='{ass_escaped}'",
+                           '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
+                    r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
+                    if r.returncode == 0 and len(r.stdout) >= RW * RH * 3:
                         _seqs[_nm] = np.frombuffer(
-                            r.stdout[:n * RW * RH * 3], dtype=np.uint8
-                        ).reshape(n, RH, RW, 3).astype(np.float32)
-            if 'b' in _seqs and 'w' in _seqs:
-                _bs, _ws = _seqs['b'], _seqs['w']
-                n = min(len(_bs), len(_ws))
-                PW, PH = self._pv_res
-                frames = []
-                _prev_key = None
-                _prev_pil = None
-                for i in range(n):
-                    _b, _w = _bs[i], _ws[i]
+                            r.stdout[:RW * RH * 3], dtype=np.uint8
+                        ).reshape(RH, RW, 3).astype(np.float32)
+                if 'b' in _seqs and 'w' in _seqs:
+                    _b, _w = _seqs['b'], _seqs['w']
                     _a = np.clip(1.0 - (_w - _b) / 255.0, 0, 1).mean(axis=2)
-                    _rgb = np.where(_a[..., None] > 1e-3,
-                                    _b / np.maximum(_a[..., None], 1e-3), 0)
-                    _out = np.dstack([np.clip(_rgb, 0, 255).astype(np.uint8),
-                                      (_a * 255).astype(np.uint8)])
-                    # Dedupe: frame giống hệt frame trước → dùng CHUNG 1 ảnh
-                    # (style tĩnh như Cổ điển/Hộp Nền chỉ tốn RAM đúng 1 frame)
-                    _key = _out.tobytes()
-                    if _key == _prev_key:
-                        frames.append(_prev_pil)
-                        continue
-                    _pil = Image.fromarray(_out, 'RGBA').resize((PW, PH), Image.LANCZOS)
-                    frames.append(_pil)
-                    _prev_key, _prev_pil = _key, _pil
-                if frames:
-                    self._pv_sub_frames = frames
-                    self._pv_sub_overlay = frames[-1]   # fallback khi pause
+                    _rgb = np.where(_a[..., None] > 1e-3, _b / np.maximum(_a[..., None], 1e-3), 0)
+                    _out = np.dstack([np.clip(_rgb, 0, 255).astype(np.uint8), (_a * 255).astype(np.uint8)])
+                    _pil = Image.fromarray(_out, 'RGBA').resize((PW, PH), _resample)
+                    self._pv_sub_overlay = _pil
+                    self._pv_sub_frames = None      # chưa có chuỗi động (dựng khi bấm Phát)
+                self._pv_step_once = True
+            else:
+                # === CHUỖI ĐỘNG 5s: chữ chạy hiệu ứng khi phát ===
+                _seqs = {}
+                for _nm, _col in (('b', 'black'), ('w', 'white')):
+                    cmd = [get_ffmpeg(), '-y',
+                           '-f', 'lavfi', '-i', f'color=c={_col}:s={RW}x{RH}:r={FPS_S}:d={seg_dur}',
+                           '-vf', f"ass='{ass_escaped}'",
+                           '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
+                    r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
+                    if r.returncode == 0 and r.stdout:
+                        n = len(r.stdout) // (RW * RH * 3)
+                        if n > 0:
+                            _seqs[_nm] = np.frombuffer(
+                                r.stdout[:n * RW * RH * 3], dtype=np.uint8
+                            ).reshape(n, RH, RW, 3).astype(np.float32)
+                if 'b' in _seqs and 'w' in _seqs:
+                    _bs, _ws = _seqs['b'], _seqs['w']
+                    n = min(len(_bs), len(_ws))
+                    frames = []
+                    _prev_key = _prev_pil = None
+                    for i in range(n):
+                        _b, _w = _bs[i], _ws[i]
+                        _a = np.clip(1.0 - (_w - _b) / 255.0, 0, 1).mean(axis=2)
+                        _rgb = np.where(_a[..., None] > 1e-3, _b / np.maximum(_a[..., None], 1e-3), 0)
+                        _out = np.dstack([np.clip(_rgb, 0, 255).astype(np.uint8), (_a * 255).astype(np.uint8)])
+                        _key = _out.tobytes()      # dedupe frame trùng (style tĩnh chỉ tốn 1 ảnh)
+                        if _key == _prev_key:
+                            frames.append(_prev_pil); continue
+                        _pil = Image.fromarray(_out, 'RGBA').resize((PW, PH), _resample)
+                        frames.append(_pil)
+                        _prev_key, _prev_pil = _key, _pil
+                    if frames:
+                        self._pv_sub_frames = frames
+                        self._pv_sub_overlay = frames[-1]   # fallback khi pause
         except Exception:
             pass
         finally:
@@ -2900,7 +3043,8 @@ class VideoGeneratorApp(ctk.CTk):
             except Exception: pass
             self._pv_sub_building = False
             if self._pv_sub_dirty:
-                try: self.after(0, self._pv_rebuild_sub_async)
+                _so = getattr(self, '_pv_sub_dirty_static', True)
+                try: self.after(0, lambda: self._pv_rebuild_sub_async(static_only=_so))
                 except Exception: pass
 
     def log(self, message):
@@ -4016,11 +4160,18 @@ class VideoGeneratorApp(ctk.CTk):
         Segment kết thúc (is_segment_ending=True) LUÔN giữ style cũ để không
         phá vỡ màn hình đen + keyword glow."""
         # --- MARGIN + ALIGNMENT theo layout ---
+        _box_center = None   # (cx,cy) px để căn chữ GIỮA khung (cả dọc + ngang)
         if layout == 'right_box':
             if text_box:
-                m_l = int(res_x * text_box.get('x', 0.50))
-                m_r = int(res_x * (1.0 - text_box.get('x', 0.50) - text_box.get('w', 0.46)))
-                m_v = int(res_y * text_box.get('y', 0.34))
+                _bx = text_box.get('x', 0.50); _bw = text_box.get('w', 0.46)
+                _by = text_box.get('y', 0.34); _bh = text_box.get('h', None)
+                m_l = int(res_x * _bx)
+                m_r = int(res_x * (1.0 - _bx - _bw))
+                m_v = int(res_y * _by)
+                if _bh:
+                    # Có chiều cao khung → căn GIỮA cả dọc lẫn ngang bằng \an5\pos(tâm khung)
+                    _box_center = (int(res_x * (_bx + _bw / 2.0)),
+                                   int(res_y * (_by + _bh / 2.0)))
             else:
                 m_l = int(res_x * 0.50); m_r = int(res_x * 0.04); m_v = int(res_y * 0.34)
             m_r = max(m_r, 10)
@@ -4063,12 +4214,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f.write(header)
 
             for ev in subtitle_events:
-                # BLACKSCREEN: luôn dùng logic cũ (keyword glow)
+                # BLACKSCREEN: luôn dùng logic cũ (keyword glow).
+                # Đánh dấu Effect="BS" → hậu xử lý KHÔNG căn-giữa-khung dòng này
+                # (màn hình đen phải giữ căn giữa MÀN HÌNH, không theo khung chữ).
                 if ev['is_segment_ending']:
                     start_ass = self.format_ass_time(ev['start'])
                     end_ass = self.format_ass_time(min(ev['end'] + 0.3, ev['scene_end']))
                     text = self.highlight_blackscreen_keyword(ev['text'], lang_code)
-                    f.write(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text}\n")
+                    f.write(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,BS,{text}\n")
                     continue
 
                 # ============================================================
@@ -4316,6 +4469,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 start_ass = self.format_ass_time(ev['start'])
                 end_ass = self.format_ass_time(min(ev['end'] + 0.3, ev['scene_end']))
                 f.write(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{ev['text']}\n")
+
+        # --- CĂN GIỮA KHUNG (cả dọc + ngang): chèn \an5\pos(tâm khung) vào MỌI
+        #     dòng phụ đề, TRỪ dòng màn-đen (Effect=BS, phải giữ giữa MÀN HÌNH) ---
+        if _box_center is not None:
+            cx, cy = _box_center
+            prefix = f"{{\\an5\\pos({cx},{cy})}}"
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                out = []
+                for ln in lines:
+                    if ln.startswith('Dialogue:'):
+                        head, _, rest = ln.partition(':')
+                        parts = rest.split(',', 9)   # 10 trường; parts[8]=Effect, parts[9]=Text
+                        if len(parts) == 10:
+                            if parts[8].strip() == 'BS':
+                                parts[8] = ''        # màn đen → bỏ marker, KHÔNG căn khung
+                            else:
+                                parts[9] = prefix + parts[9]
+                            ln = head + ':' + ','.join(parts)
+                    out.append(ln)
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.writelines(out)
+            except Exception:
+                pass
 
     def get_audio_duration(self, file_path):
         cmd = [get_ffmpeg('ffprobe'), '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
@@ -4667,7 +4845,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if kb_tb and kb_tb.get('enabled'):
             ass_layout = 'right_box'
             ass_text_box = {'x': kb_tb.get('x', 0.1), 'y': kb_tb.get('y', 0.66),
-                            'w': kb_tb.get('w', 0.8)}
+                            'w': kb_tb.get('w', 0.8), 'h': kb_tb.get('h')}
         else:
             ass_layout = 'center'
             ass_text_box = None
@@ -5830,7 +6008,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if kb_tb and kb_tb.get('enabled'):
             ass_layout, ass_box = 'right_box', {'x': kb_tb.get('x', 0.1),
                                                 'y': kb_tb.get('y', 0.66),
-                                                'w': kb_tb.get('w', 0.8)}
+                                                'w': kb_tb.get('w', 0.8), 'h': kb_tb.get('h')}
         else:
             ass_layout, ass_box = 'center', None
 
@@ -7052,6 +7230,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 tb_lines = tb_text.strip().split("\n")
                 for line in tb_lines[-8:]:
                     self.log(f"   {line}")
+                # Gửi báo cáo lỗi render về Discord của dev
+                _ctx = f"render: {os.path.basename((self.current_task or {}).get('voice_file',''))}"
+                self._report_error_remote(f"Lỗi render: {type(e).__name__}: {e}",
+                                          str(e), tb_text, _ctx)
                 
                 # Ghi đầy đủ vào debug_logger
                 if DEBUG_LOGGER_AVAILABLE:
