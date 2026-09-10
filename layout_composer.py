@@ -28,7 +28,7 @@ import tkinter.font as tkfont
 
 # Phiên bản composer — app.py kiểm tra lúc khởi động để phát hiện
 # trường hợp máy chỉ được copy đè app.py mà quên layout_composer.py
-COMPOSER_VERSION = "2.1"
+COMPOSER_VERSION = "2.3"
 
 from PIL import Image, ImageTk
 
@@ -192,6 +192,19 @@ class LayoutComposer:
                 return l
         return None
 
+    def _needs_ai_key(self, layer):
+        """Layer có phải chạy tách nền NẶNG (AI/grabcut/color) không? — để tách nền
+        ra luồng NỀN, tránh treo giao diện."""
+        t = layer.get('type')
+        if t == 'waveform':
+            return False
+        km = layer.get('key_method', 'none')
+        if t == 'image':
+            return km not in ('none', None)
+        if t == 'greenscreen':
+            return km == 'color'
+        return False
+
     def _get_thumb(self, layer, fast=False):
         cw_px = max(8, int(layer['w'] * self.cw))
         ch_px = max(8, int(layer['h'] * self.ch))
@@ -201,7 +214,16 @@ class LayoutComposer:
                layer.get('key_erode', 0), layer.get('key_feather', 1.0))
         base = self._thumb_cache.get(sig)
         if base is None:
-            base = self._build_keyed_pil(layer)
+            if self._needs_ai_key(layer):
+                # TÁCH NỀN NẶNG → chạy NỀN, KHÔNG chặn giao diện.
+                # Trong lúc chờ: hiện ảnh gốc (chưa tách) để user vẫn kéo-thả được.
+                self._kick_async_key(layer, sig)
+                ph = self._raw_pil(layer)
+                try:
+                    return ph.resize((cw_px, ch_px), Image.BILINEAR)
+                except Exception:
+                    return ph
+            base = self._build_keyed_pil(layer)   # nhẹ (none / grab frame)
             self._thumb_cache[sig] = base
         # Cache ảnh ĐÃ SCALE theo (sig, kích thước px, chế độ resample) → kéo/di
         # chuyển KHÔNG đổi kích thước sẽ trúng cache, khỏi resize lại mỗi frame.
@@ -222,6 +244,53 @@ class LayoutComposer:
             scache.clear()
         scache[rk] = out
         return out
+
+    def _raw_pil(self, layer):
+        """Ảnh gốc CHƯA tách nền (placeholder nhanh khi đang tách nền ở nền)."""
+        try:
+            src = layer.get('path', '')
+            if layer.get('type') == 'greenscreen':
+                pil = self.app._grab_video_frame(src)
+                return pil.convert('RGBA') if pil is not None else self._placeholder(layer)
+            return Image.open(src).convert('RGBA')
+        except Exception:
+            return self._placeholder(layer)
+
+    def _kick_async_key(self, layer, sig):
+        """Chạy tách nền ở LUỒNG NỀN; xong thì cache + vẽ lại (trên main thread)."""
+        import threading
+        inflight = getattr(self, '_keying_inflight', None)
+        if inflight is None:
+            inflight = self._keying_inflight = set()
+        if sig in inflight:
+            return
+        inflight.add(sig)
+        try:
+            self.app.log(f"🧠 Đang tách nền '{layer.get('name','')}' (chạy nền, không treo tool)...")
+        except Exception:
+            pass
+
+        def _work():
+            keyed = None
+            try:
+                keyed = self._build_keyed_pil(layer)
+            except Exception:
+                keyed = None
+            def _done():
+                inflight.discard(sig)
+                if keyed is not None:
+                    self._thumb_cache[sig] = keyed
+                    self._invalidate_scaled(layer)
+                    self.render_all()
+                    try:
+                        self.app.log(f"✅ Tách nền xong: {layer.get('name','')}")
+                    except Exception:
+                        pass
+            try:
+                self.app.after(0, _done)
+            except Exception:
+                inflight.discard(sig)
+        threading.Thread(target=_work, daemon=True).start()
 
     def _invalidate_scaled(self, layer=None):
         """Xóa cache ảnh đã scale (khi đổi ảnh/tách nền)."""
@@ -919,6 +988,21 @@ class LayoutComposer:
                 rerender()
             menu.configure(command=on_method)
             menu.pack(fill="x", padx=14, pady=(0, 4))
+
+            # Công tắc TÁCH MỊN (alpha matting) — rìa tóc mượt như CapCut, chậm hơn chút
+            sw_fine = ctk.CTkSwitch(win, text="Tách MỊN (rìa tóc mượt — chậm hơn chút)")
+            if getattr(self.app, 'jesus_key_fine', False):
+                sw_fine.select()
+
+            def on_fine_toggle():
+                self.app.jesus_key_fine = bool(sw_fine.get())
+                # đổi chế độ → xoá cache tách nền của mọi layer để tách lại
+                self._thumb_cache.clear()
+                self._invalidate_scaled()
+                rerender()
+                self._notify_change()
+            sw_fine.configure(command=on_fine_toggle)
+            sw_fine.pack(anchor="w", padx=14, pady=(2, 6))
         else:
             # Công tắc BẬT/TẮT tách nền cho video (mặc định thêm mới = TẮT)
             sw_key = ctk.CTkSwitch(win, text="Tách nền video (phông xanh/màu đặc)")

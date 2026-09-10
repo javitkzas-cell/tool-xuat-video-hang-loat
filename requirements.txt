@@ -27,6 +27,8 @@ tiktoken
 # May co GPU NVIDIA: chay  CAI_TORCH_GPU.bat  de len ban GPU (nhanh 5-10s).
 # Tinh nang tu-cap-nhat da duoc chinh de KHONG dung toi torch (giu ban GPU).
 torch
+# torchaudio: can cho MMS forced-aligner (giong chu vao tieng, nhanh gap ~10x Whisper)
+torchaudio
 
 # --- TUY CHON: tach nen AI (rembg). Duoc cai rieng o buoc 4 cua
 #     2_CAI_DAT_MAY_MOI.bat de neu loi cung KHONG chan cai dat chinh.

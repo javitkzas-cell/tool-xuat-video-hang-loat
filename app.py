@@ -15,7 +15,7 @@ import traceback
 import queue as queue_module
 
 # --- APP INFO ---
-APP_VERSION = "1.9.5"
+APP_VERSION = "2.0.1"
 APP_NAME = "Vạn Phẩm - Batch Render Engine"
 GITHUB_REPO = "javitkzas-cell/tool-xuat-video-hang-loat"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/van-pham")
 UPDATE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -26,7 +26,7 @@ UPDATE_CODE_FILES = [
     'requirements.txt', 'run.bat', 'run_subtitle.bat',
     '2_CAI_DAT_MAY_MOI.bat', 'HUONG_DAN_CAI_DAT_MAY_MOI.txt',
     'icon.ico', 'TAO_SHORTCUT.bat', 'HUONG_DAN_BAO_LOI_DISCORD.txt',
-    'CAI_TACH_NEN.bat', 'CAI_TORCH_GPU.bat',
+    'CAI_TACH_NEN.bat', 'CAI_TORCH_GPU.bat', 'KIEM_TRA_GPU.bat',
 ]
 # --- BÁO LỖI TỪ XA (Discord webhook) ---
 # Dán link webhook Discord của bạn vào đây → mọi máy khác gặp lỗi sẽ tự gửi
@@ -4523,37 +4523,93 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # over-scale SW×SH @30fps. Các lần render sau dùng lại file cache
     # → bỏ hẳn bước decode 4K + scale trong filtergraph → render nhanh hơn nhiều.
     # =========================================================
+    PROBE_CACHE_FILE = os.path.join(APP_DIR, "probe_cache.json")
+
+    def _probe_cache_load(self):
+        """Nạp cache probe từ đĩa (1 lần/phiên) → các lần render sau KHÔNG probe lại."""
+        cache = getattr(self, '_bg_probe_cache', None)
+        if cache is not None:
+            return cache
+        cache = {}
+        try:
+            import json
+            with open(self.PROBE_CACHE_FILE, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            for k, v in raw.items():
+                p, m, s = k.rsplit('|', 2)
+                cache[(p, int(m), int(s))] = v
+        except Exception:
+            pass
+        self._bg_probe_cache = cache
+        return cache
+
+    def _probe_cache_save(self):
+        try:
+            import json
+            cache = getattr(self, '_bg_probe_cache', None) or {}
+            raw = {f"{p}|{m}|{s}": v for (p, m, s), v in cache.items()}
+            tmp = self.PROBE_CACHE_FILE + ".tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(raw, f, ensure_ascii=False)
+            os.replace(tmp, self.PROBE_CACHE_FILE)
+        except Exception:
+            pass
+
     def _probe_video_info(self, path):
-        """Probe nhanh thông tin luồng HÌNH của 1 file video (cache theo path+mtime+size).
-        Trả về dict {'codec','w','h','fps','pix_fmt'} hoặc None nếu file không có
-        luồng hình / không đọc được → dùng để LOẠI SỚM file hỏng khỏi danh sách nền."""
+        """Probe 1 file video → {'codec','w','h','fps','pix_fmt','dur'} hoặc None
+        (không có luồng hình / hỏng). MỘT lần ffprobe lấy cả thông tin lẫn thời lượng.
+        Cache theo (path, mtime, size) cả trong RAM lẫn trên đĩa."""
         try:
             st = os.stat(path)
             key = (path, st.st_mtime_ns, st.st_size)
         except Exception:
             return None
-        cache = getattr(self, '_bg_probe_cache', None)
-        if cache is None:
-            cache = self._bg_probe_cache = {}
+        cache = self._probe_cache_load()
         if key in cache:
             return cache[key]
         info = None
         try:
+            import json
             r = subprocess.run(
                 [get_ffmpeg('ffprobe'), '-v', 'error', '-select_streams', 'v:0',
-                 '-show_entries', 'stream=codec_name,width,height,avg_frame_rate,pix_fmt',
-                 '-of', 'csv=p=0', path],
+                 '-show_entries', 'stream=codec_name,width,height,avg_frame_rate,pix_fmt'
+                                  ':format=duration',
+                 '-of', 'json', path],
                 capture_output=True, text=True, timeout=30, creationflags=0x08000000)
-            line = (r.stdout or '').strip().splitlines()
-            if r.returncode == 0 and line:
-                p = line[0].split(',')
-                if len(p) >= 4 and p[0] and int(p[1]) > 0 and int(p[2]) > 0:
-                    info = {'codec': p[0], 'w': int(p[1]), 'h': int(p[2]),
-                            'fps': p[3], 'pix_fmt': p[4] if len(p) > 4 else ''}
+            if r.returncode == 0 and r.stdout:
+                j = json.loads(r.stdout)
+                st0 = (j.get('streams') or [{}])[0]
+                w, h = int(st0.get('width') or 0), int(st0.get('height') or 0)
+                if st0.get('codec_name') and w > 0 and h > 0:
+                    info = {'codec': st0.get('codec_name'), 'w': w, 'h': h,
+                            'fps': st0.get('avg_frame_rate', ''), 'pix_fmt': st0.get('pix_fmt', ''),
+                            'dur': float((j.get('format') or {}).get('duration') or 0.0)}
         except Exception:
             info = None
         cache[key] = info
         return info
+
+    def _probe_many(self, paths, label="clip", silent=False):
+        """Probe NHIỀU file SONG SONG (8 luồng) — thư mục nền vài trăm clip probe
+        tuần tự mất 10-20 phút; song song + cache đĩa → vài giây, lần sau ~0s.
+        Trả về dict path→info (None = file hỏng)."""
+        from concurrent.futures import ThreadPoolExecutor
+        cache = self._probe_cache_load()
+        need = []
+        for p in paths:
+            try:
+                st = os.stat(p)
+                if (p, st.st_mtime_ns, st.st_size) not in cache:
+                    need.append(p)
+            except Exception:
+                need.append(p)
+        if need and not silent:
+            self.log(f"🔎 Đọc thông tin {len(need)}/{len(paths)} {label} (lần đầu, song song 8 luồng)...")
+        if need:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                list(ex.map(self._probe_video_info, need))
+            self._probe_cache_save()
+        return {p: self._probe_video_info(p) for p in paths}
 
     def check_nvenc(self):
         """Kiểm tra GPU NVIDIA có hỗ trợ h264_nvenc không.
@@ -4731,8 +4787,181 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         M = np.float32([[scale, 0, (1 - scale) * cx + tx], [0, scale, (1 - scale) * cy + ty]])
         return cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR)
 
+    # ============================================================
+    # GIÓNG CHỮ ↔ TIẾNG bằng MMS forced-aligner (torchaudio / wav2vec2)
+    # Model NHỎ chuyên "gióng văn bản có sẵn vào audio" — không phải model
+    # nhận dạng giọng nói như Whisper → nhanh gấp ~10 lần, chạy theo cửa sổ
+    # 30s nên nhẹ RAM/VRAM dù audio dài hàng giờ. Đa ngôn ngữ (Anh/Việt...).
+    # ============================================================
+    def _load_audio_16k(self, path):
+        """Đọc audio → numpy float32 mono 16kHz qua ffmpeg đi kèm tool."""
+        cmd = [get_ffmpeg(), '-nostdin', '-threads', '0', '-i', path,
+               '-f', 'f32le', '-ac', '1', '-ar', '16000', '-']
+        r = subprocess.run(cmd, capture_output=True, creationflags=0x08000000)
+        if r.returncode != 0 or not r.stdout:
+            raise RuntimeError("ffmpeg không đọc được audio")
+        return np.frombuffer(r.stdout, dtype=np.float32).copy()
+
+    @staticmethod
+    def _mms_normalize_word(w):
+        """Chuẩn hoá 1 từ về [a-z'] cho MMS: bỏ dấu tiếng Việt (đ→d), bỏ ký tự khác.
+        (Chỉ dùng để GIÓNG — chữ hiển thị vẫn là chữ gốc có dấu.)"""
+        import unicodedata
+        s = w.replace('đ', 'd').replace('Đ', 'D')
+        s = unicodedata.normalize('NFD', s)
+        s = ''.join(ch for ch in s if unicodedata.category(ch) != 'Mn')
+        return re.sub(r"[^a-z']", '', s.lower())
+
+    def _align_mms_words(self, voice_path, script_text, voice_dur, silent=False):
+        """Gióng kịch bản vào audio → list {'word','start','end'} theo đúng thứ tự
+        kịch bản. Trả None nếu không dùng được MMS → caller fallback Whisper."""
+        try:
+            import torch
+            from torchaudio.pipelines import MMS_FA as bundle
+        except Exception as e:
+            self.log(f"ℹ Không có MMS aligner ({e}) → dùng Whisper.")
+            return None
+        try:
+            tokens_orig = script_text.split()
+            if not tokens_orig:
+                return None
+            norm = [self._mms_normalize_word(t) for t in tokens_orig]
+            align_idx = [i for i, n in enumerate(norm) if n]   # từ có chữ để gióng
+            if not align_idx:
+                return None
+            align_words = [norm[i] for i in align_idx]
+
+            dev = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if getattr(self, '_mms_model', None) is None:
+                # Trọng số lưu trong models\torch_hub (đi kèm gói mang đi → offline)
+                _hub = os.path.join(APP_DIR, 'models', 'torch_hub')
+                os.makedirs(_hub, exist_ok=True)
+                torch.hub.set_dir(_hub)
+                if not silent:
+                    self.log("🧠 Nạp MMS forced-aligner (LẦN ĐẦU tải ~1.2GB, các lần sau offline)...")
+                self._mms_model = bundle.get_model().to(dev).eval()
+                self._mms_tokenizer = bundle.get_tokenizer()
+                self._mms_aligner = bundle.get_aligner()
+                self.log(f"🧠 MMS aligner sẵn sàng trên {'GPU' if dev == 'cuda' else 'CPU'}.")
+            model, tokenizer, aligner = self._mms_model, self._mms_tokenizer, self._mms_aligner
+
+            wav = self._load_audio_16k(voice_path)
+            SR = 16000
+            total = len(wav) / SR
+            W = 30.0                      # cửa sổ audio (giây)
+            n_words = len(align_words)
+            out = [None] * n_words
+            pos, t = 0, 0.0
+            rate = 2.5                    # từ/giây (tự đo lại theo giọng đọc)
+            n_fail = 0
+            n_win = 0
+            while pos < n_words and t < total - 0.05:
+                if self.cancel_render:
+                    return None
+                t_end = min(t + W, total)
+                seg = wav[int(t * SR): int(t_end * SR)]
+                if len(seg) < SR * 0.5:
+                    break
+                k_try = int(max(8, min(160, rate * (t_end - t) * 0.6)))
+                k_try = min(k_try, n_words - pos)
+                ok = False
+                last_end = t
+                for _attempt in range(4):
+                    # '*' (star) ở cuối = "phần audio còn lại là gì cũng được" →
+                    # cửa sổ không cần kết thúc đúng chữ cuối.
+                    words_win = align_words[pos:pos + k_try] + ['*']
+                    try:
+                        with torch.inference_mode():
+                            x = torch.from_numpy(seg).unsqueeze(0).to(dev)
+                            emission, _ = model(x)
+                        spans = aligner(emission[0], tokenizer(words_win))[:k_try]
+                        ratio = x.size(1) / emission.size(1)
+                        for wi, sp in enumerate(spans):
+                            out[pos + wi] = (sp[0].start * ratio / SR + t,
+                                             sp[-1].end * ratio / SR + t)
+                        last_end = out[pos + k_try - 1][1]
+                        # Chữ cuối chạm sát mép cửa sổ → có thể chữ bị TRÀN → giảm K thử lại
+                        if k_try > 8 and t_end < total and last_end > t_end - 0.4:
+                            k_try = max(8, k_try // 2)
+                            continue
+                        ok = True
+                        break
+                    except Exception:
+                        k_try = max(4, k_try // 2)
+                        if k_try <= 4 and _attempt >= 2:
+                            break
+                if not ok:
+                    # Hiếm: audio không khớp kịch bản đoạn này → dàn đều rồi đi tiếp
+                    n_fail += 1
+                    k_try = min(max(k_try, 4), n_words - pos)
+                    span_len = (t_end - t) * 0.6
+                    for wi in range(k_try):
+                        out[pos + wi] = (t + span_len * wi / k_try, t + span_len * (wi + 1) / k_try)
+                    last_end = t + span_len
+                dur_used = max(0.3, last_end - t)
+                rate = max(1.0, min(5.0, 0.5 * rate + 0.5 * (k_try / dur_used)))
+                pos += k_try
+                t = max(t + 0.5, last_end - 0.15)
+                n_win += 1
+                if not silent and n_win % 10 == 0:
+                    self.after(0, self.set_render_stage, "whisper",
+                               f"Gióng chữ vào tiếng... {min(100, int(100 * t / max(total, 1)))}%",
+                               0.17 + 0.02 * min(1.0, t / max(total, 1)))
+            if pos < n_words:   # hết audio mà còn chữ → dàn đều tới cuối
+                s0 = out[pos - 1][1] if pos > 0 else t
+                rem = n_words - pos
+                span = max(0.5, total - s0)
+                for wi in range(rem):
+                    out[pos + wi] = (s0 + span * wi / rem, s0 + span * (wi + 1) / rem)
+
+            # Ghép lại đủ mọi từ gốc; từ không có chữ (số/ký hiệu) gắn vào từ trước
+            words, ai, last = [], 0, None
+            for i, tok in enumerate(tokens_orig):
+                if ai < len(align_idx) and align_idx[ai] == i:
+                    s, e = out[ai]; ai += 1
+                    last = (s, e)
+                else:
+                    s, e = last if last else (0.0, 0.0)
+                words.append({'word': tok, 'start': float(s), 'end': float(max(e, s))})
+            if n_fail and not silent:
+                self.log(f"ℹ MMS: {n_fail} cửa sổ phải ước lượng (đoạn audio không khớp kịch bản).")
+            return words
+        except Exception as e:
+            self.log(f"ℹ MMS aligner lỗi ({e}) → dùng Whisper.")
+            return None
+
+    def _events_from_words(self, words, voice_dur):
+        """Gom từ (đã có mốc) thành câu phụ đề — mô phỏng logic cũ: ngắt ở . ? !
+        | ngắt ở dấu phẩy khi có nghỉ >0.3s | ngắt khi lặng >0.5s | tối đa 45 ký tự."""
+        events, cur = [], []
+
+        def flush():
+            if cur:
+                events.append({'start': cur[0]['start'], 'end': cur[-1]['end'],
+                               'text': ' '.join(w['word'] for w in cur),
+                               'words': [dict(w) for w in cur]})
+                cur.clear()
+
+        for i, w in enumerate(words):
+            if cur and len(' '.join(x['word'] for x in cur)) + 1 + len(w['word']) > 45:
+                flush()
+            cur.append(w)
+            nxt = words[i + 1] if i + 1 < len(words) else None
+            gap = (nxt['start'] - w['end']) if nxt else 0.0
+            tail = w['word'].rstrip('"\')]»')
+            if tail.endswith(('.', '?', '!')) or gap > 0.5 or (tail.endswith(',') and gap > 0.3):
+                flush()
+        flush()
+        out = []
+        for i, ev in enumerate(events):
+            next_start = events[i + 1]['start'] if i + 1 < len(events) else voice_dur
+            out.append({'start': ev['start'], 'end': ev['end'], 'scene_end': next_start,
+                        'text': ev['text'].strip(), 'gap_after': next_start - ev['end'],
+                        'is_segment_ending': False, 'words': ev['words']})
+        return out
+
     def _preprocess_task(self, task, silent=False):
-        """Pre-process 1 task: Whisper alignment → subtitle → scene list."""
+        """Pre-process 1 task: gióng chữ↔tiếng (MMS, fallback Whisper) → subtitle → scene list."""
         import stable_whisper
 
         W, H = self.get_resolution(task['ratio_name'])
@@ -4781,9 +5010,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         script_content = re.sub(r'<#\d+(?:\.\d+)?#>', '', script_content)
 
         if self.cancel_render: return None
-        
-        # Cache model whisper
-        if not hasattr(self, '_whisper_model') or self._whisper_model is None:
+
+        # ===== ĐƯỜNG CHÍNH: MMS forced-aligner (nhanh, nhẹ) =====
+        subtitle_events = None
+        if not task.get('use_whisper_align'):
+            if not silent:
+                self.after(0, self.set_render_stage, "whisper", "Gióng chữ vào tiếng (MMS aligner)...", 0.17)
+            _t0 = time.time()
+            _wds = self._align_mms_words(task['voice_file'], script_content, voice_dur, silent=silent)
+            if _wds:
+                subtitle_events = self._events_from_words(_wds, voice_dur)
+                self.log(f"⏱ MMS gióng xong: {time.time() - _t0:.1f}s cho audio "
+                         f"{voice_dur / 60:.1f} phút ({len(_wds)} từ, {len(subtitle_events)} câu).")
+        if self.cancel_render: return None
+
+        # ===== DỰ PHÒNG: Whisper align (khi MMS không dùng được) =====
+        if subtitle_events is None and (not hasattr(self, '_whisper_model') or self._whisper_model is None):
             if not silent:
                 self.log("🧠 Đang tải AI model lần đầu (sẽ cache cho các video sau)...")
                 self.after(0, self.set_render_stage, "whisper", "Tải Whisper AI model (lần đầu ~30s)...", 0.17)
@@ -4793,6 +5035,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             _dev = 'cpu'
             try:
                 import torch
+                self.log(f"🐍 Python: {sys.executable}")
+                self.log(f"🔥 torch: {getattr(torch, '__version__', '?')}")
                 if torch.cuda.is_available():
                     _dev = 'cuda'
             except Exception:
@@ -4808,43 +5052,64 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 self.log("⚠ Whisper đang chạy trên CPU → PHÂN TÍCH CHẬM.")
                 self.log("   Nguyên nhân: PyTorch trên máy là bản CPU (thường do cài lại thư viện).")
                 self.log("   Khắc phục: chạy file  CAI_TORCH_GPU.bat  (cần GPU NVIDIA).")
-        model = self._whisper_model
-        
-        if not silent:
-            self.after(0, self.set_render_stage, "whisper", "AI phân tích từng từ trong voice...", 0.18)
-        if silent:
-            self.log("⏳ Pipeline: Đang phân tích kịch bản video tiếp theo...")
-        
-        result = model.align(task['voice_file'], script_content, language=lang_code, verbose=False)
-        result.split_by_punctuation([('.', ' '), ('?', ' '), ('!', ' '), (',', ' ')])
-        result.split_by_gap(0.5)
-        result.merge_by_gap(0.3)
-        result.split_by_length(max_chars=45)
+        if subtitle_events is None:
+            model = self._whisper_model
+            if not silent:
+                self.after(0, self.set_render_stage, "whisper", "AI phân tích từng từ trong voice...", 0.18)
+            if silent:
+                self.log("⏳ Pipeline: Đang phân tích kịch bản video tiếp theo...")
 
-        if self.cancel_render: return None
+            # fast_mode=True: stable-ts đời mới (>=2.17) mặc định căn chỉnh "kỹ" →
+            # CHẬM. fast_mode bỏ các lượt tinh chỉnh. Bản cũ không có tham số → bỏ qua.
+            _align_kw = dict(language=lang_code, verbose=False)
 
-        segments = result.segments
-        subtitle_events = []
-        for i, seg in enumerate(segments):
-            next_start = segments[i+1].start if i+1 < len(segments) else voice_dur
-            gap = next_start - seg.end
-            # Trích word-level timestamps (cho karaoke/word_reveal/mrbeast)
-            words = []
-            if hasattr(seg, 'words') and seg.words:
-                for w in seg.words:
-                    try:
-                        words.append({
-                            'word': w.word.strip(),
-                            'start': float(w.start),
-                            'end': float(w.end)
-                        })
-                    except Exception:
-                        pass
-            subtitle_events.append({
-                'start': seg.start, 'end': seg.end, 'scene_end': next_start,
-                'text': seg.text.strip(), 'gap_after': gap, 'is_segment_ending': False,
-                'words': words
-            })
+            def _do_align():
+                try:
+                    return model.align(task['voice_file'], script_content, fast_mode=True, **_align_kw)
+                except TypeError:
+                    return model.align(task['voice_file'], script_content, **_align_kw)
+
+            # Chạy đường NHANH (SDPA) trước; chỉ khi stable-ts cũ dính lỗi
+            # "'NoneType' object is not subscriptable" mới tắt SDPA chạy lại.
+            _t0 = time.time()
+            try:
+                result = _do_align()
+            except TypeError as _te:
+                if 'subscriptable' not in str(_te):
+                    raise
+                try:
+                    from whisper.model import disable_sdpa
+                except ImportError:
+                    raise _te
+                self.log("ℹ stable-ts đời cũ + whisper mới → tắt SDPA, căn chỉnh lại...")
+                with disable_sdpa():
+                    result = _do_align()
+            self.log(f"⏱ Whisper căn chỉnh xong: {time.time() - _t0:.1f}s cho audio {voice_dur/60:.1f} phút.")
+            result.split_by_punctuation([('.', ' '), ('?', ' '), ('!', ' '), (',', ' ')])
+            result.split_by_gap(0.5)
+            result.merge_by_gap(0.3)
+            result.split_by_length(max_chars=45)
+
+            if self.cancel_render: return None
+
+            segments = result.segments
+            subtitle_events = []
+            for i, seg in enumerate(segments):
+                next_start = segments[i+1].start if i+1 < len(segments) else voice_dur
+                gap = next_start - seg.end
+                words = []
+                if hasattr(seg, 'words') and seg.words:
+                    for w in seg.words:
+                        try:
+                            words.append({'word': w.word.strip(),
+                                          'start': float(w.start), 'end': float(w.end)})
+                        except Exception:
+                            pass
+                subtitle_events.append({
+                    'start': seg.start, 'end': seg.end, 'scene_end': next_start,
+                    'text': seg.text.strip(), 'gap_after': gap, 'is_segment_ending': False,
+                    'words': words
+                })
 
         is_jesus = task.get('render_mode') == 'jesus_split'
 
@@ -4910,8 +5175,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 cid_files = [os.path.join(cid_folder, f) for f in os.listdir(cid_folder) if f.lower().endswith(valid_video)]
                 if cid_files:
                     random.shuffle(cid_files)
+                    _cinfo = self._probe_many(cid_files, label="video CID", silent=silent)
                     for cf in cid_files:
-                        dur = self.get_audio_duration(cf)
+                        dur = float((_cinfo.get(cf) or {}).get('dur') or 0.0)
                         if dur > 0:
                             cid_videos.append({'path': cf, 'duration': dur})
                             cid_total_dur += dur
@@ -4929,9 +5195,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if not bg_videos:
                 raise ValueError(f"Thư mục Video nền '{bg_folder}' không có file video!")
 
-            # LỌC SỚM file hỏng / không có luồng hình (file .mp4 chỉ có audio,
-            # file 0 byte, file chép dở...) → tránh lỗi giữa chừng lúc render
-            _bad = [v for v in bg_videos if self._probe_video_info(v) is None]
+            # Probe MỘT lần cho cả thư mục (song song + cache đĩa): vừa lọc file
+            # hỏng/không có hình, vừa lấy luôn thời lượng → không còn probe tuần tự
+            # 2 lần/clip (nguyên nhân "phân tích" đứng 10-20 phút với thư mục lớn).
+            if not silent:
+                self.after(0, self.set_render_stage, "whisper", "Đọc thư mục video nền...", 0.19)
+            _binfo = self._probe_many(bg_videos, label="clip nền", silent=silent)
+            _bad = [v for v in bg_videos if _binfo.get(v) is None]
             if _bad:
                 for _b in _bad:
                     if not silent:
@@ -4940,12 +5210,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if not bg_videos:
                 raise ValueError(f"Thư mục Video nền '{bg_folder}' không có file video hợp lệ nào!")
 
-            # Cache thời lượng để khỏi probe lại cùng 1 file nhiều lần
-            _bg_dur_cache = {}
             def _bg_dur(v):
-                if v not in _bg_dur_cache:
-                    _bg_dur_cache[v] = self.get_audio_duration(v)
-                return _bg_dur_cache[v]
+                return float((_binfo.get(v) or {}).get('dur') or 0.0)
 
             BG_SAFETY = 1.0  # dư 1s để chắc chắn không hụt cuối video
             XF = self.jesus_xfade_dur  # mỗi xfade "ăn" T giây (dùng T tối đa để ước lượng → luôn phủ đủ)
@@ -5104,8 +5370,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             cid_files = [os.path.join(cid_folder, f) for f in os.listdir(cid_folder) if f.lower().endswith(valid_video)]
             if cid_files:
                 random.shuffle(cid_files)
+                _cinfo = self._probe_many(cid_files, label="video CID", silent=silent)
                 for cf in cid_files:
-                    dur = self.get_audio_duration(cf)
+                    dur = float((_cinfo.get(cf) or {}).get('dur') or 0.0)
                     if dur > 0:
                         cid_videos.append({'path': cf, 'duration': dur})
                         cid_total_dur += dur
