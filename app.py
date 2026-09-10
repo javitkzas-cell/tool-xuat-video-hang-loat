@@ -15,7 +15,7 @@ import traceback
 import queue as queue_module
 
 # --- APP INFO ---
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.5"
 APP_NAME = "Vạn Phẩm - Batch Render Engine"
 GITHUB_REPO = "javitkzas-cell/tool-xuat-video-hang-loat"  # ← Thay bằng repo GitHub của bạn (vd "minhchinh/van-pham")
 UPDATE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -26,6 +26,7 @@ UPDATE_CODE_FILES = [
     'requirements.txt', 'run.bat', 'run_subtitle.bat',
     '2_CAI_DAT_MAY_MOI.bat', 'HUONG_DAN_CAI_DAT_MAY_MOI.txt',
     'icon.ico', 'TAO_SHORTCUT.bat', 'HUONG_DAN_BAO_LOI_DISCORD.txt',
+    'CAI_TACH_NEN.bat', 'CAI_TORCH_GPU.bat',
 ]
 # --- BÁO LỖI TỪ XA (Discord webhook) ---
 # Dán link webhook Discord của bạn vào đây → mọi máy khác gặp lỗi sẽ tự gửi
@@ -119,7 +120,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 # --- TRÌNH KÉO-THẢ BỐ CỤC (dùng chung cho CẢ 2 mode) ---
-REQUIRED_COMPOSER_VERSION = "2.1"   # phải khớp COMPOSER_VERSION trong layout_composer.py
+REQUIRED_COMPOSER_VERSION = "2.3"   # phải khớp COMPOSER_VERSION trong layout_composer.py
 try:
     from layout_composer import LayoutComposer
     try:
@@ -253,6 +254,7 @@ class VideoGeneratorApp(ctk.CTk):
         self.jesus_key_method = "auto"   # auto | rembg | grabcut | color | none
         self.jesus_key_erode = 0         # co rìa N px (xoá lem nền)
         self.jesus_key_feather = 1.0     # làm mượt rìa (gauss sigma)
+        self.jesus_key_fine = False      # True = tách MỊN (alpha matting, rìa tóc, chậm hơn)
         self._rembg_session = None       # cache model rembg
         # Thời lượng crossfade (xfade) giữa các clip nền, giây. Đặt 0 = cắt cứng.
         self.jesus_xfade_dur = 0.5
@@ -1173,16 +1175,29 @@ class VideoGeneratorApp(ctk.CTk):
             self.log(f"✅ Đã cập nhật {len(replaced)} file: {', '.join(replaced)}")
             self.log(f"   (Bản cũ backup tại backup_update\\v{APP_VERSION})")
 
-            # Thư viện mới (nếu requirements đổi)
+            # Thư viện mới (nếu requirements đổi) — nhưng KHÔNG ĐỤNG TỚI torch:
+            # torch cài qua requirements sẽ là bản CPU → phân tích kịch bản chậm.
+            # Giữ nguyên torch đang có (thường là bản GPU user tự cài), chỉ cài các
+            # gói KHÁC còn thiếu/đổi.
             if req_new and req_new != req_old:
-                self.log("📦 requirements.txt thay đổi → đang cài thư viện mới (có thể mất vài phút)...")
-                r = subprocess.run([sys.executable, '-m', 'pip', 'install', '-r',
-                                    os.path.join(APP_DIR, 'requirements.txt')],
-                                   capture_output=True, text=True, creationflags=0x08000000)
-                if r.returncode == 0:
-                    self.log("✅ Đã cài xong thư viện mới.")
-                else:
-                    self.log("⚠ Cài thư viện lỗi — hãy chạy lại 2_CAI_DAT_MAY_MOI.bat sau khi tool khởi động lại.")
+                self.log("📦 requirements.txt thay đổi → cài thư viện mới (BỎ QUA torch để giữ bản GPU)...")
+                _req_lines = [ln for ln in req_new.splitlines()
+                              if ln.strip() and not ln.strip().startswith('#')
+                              and not ln.strip().lower().startswith(('torch', 'torchvision', 'torchaudio'))]
+                _tmp_req = os.path.join(TEMP_DIR, "update_requirements_notorch.txt")
+                try:
+                    with open(_tmp_req, 'w', encoding='utf-8') as _rf:
+                        _rf.write("\n".join(_req_lines))
+                    r = subprocess.run([sys.executable, '-m', 'pip', 'install', '-r', _tmp_req],
+                                       capture_output=True, text=True, creationflags=0x08000000)
+                    if r.returncode == 0:
+                        self.log("✅ Đã cài xong thư viện mới (torch giữ nguyên).")
+                    else:
+                        self.log("⚠ Cài thư viện lỗi — hãy chạy lại 2_CAI_DAT_MAY_MOI.bat sau khi khởi động lại.")
+                    try: os.remove(_tmp_req)
+                    except Exception: pass
+                except Exception as _re2:
+                    self.log(f"⚠ Không cài được thư viện mới: {_re2}")
 
             # Dọn tạm
             try:
@@ -1244,6 +1259,7 @@ class VideoGeneratorApp(ctk.CTk):
                 'language': self.lang_combo.get(),
                 'subtitle_style': self.subtitle_style_combo.get(),
                 'sub_case': self.sub_case,
+                'jesus_key_fine': self.jesus_key_fine,
                 'sub_text_color': self.sub_text_color,
                 'sub_outline_color': self.sub_outline_color,
                 'sub_glow': self.sub_glow,
@@ -1314,6 +1330,7 @@ class VideoGeneratorApp(ctk.CTk):
             self.lang_combo.set(d.get('language', 'English'))
             self.subtitle_style_combo.set(d.get('subtitle_style', 'Cổ điển'))
             self.sub_case = d.get('sub_case', 'keep')
+            self.jesus_key_fine = bool(d.get('jesus_key_fine', False))
             _case_inv = {'upper': 'AA', 'title': 'Aa', 'lower': 'aa'}
             self.case_seg.set(_case_inv.get(self.sub_case, "Giữ nguyên"))
             self.sub_text_color = d.get('sub_text_color', '#FFFFFF')
@@ -4772,11 +4789,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 self.after(0, self.set_render_stage, "whisper", "Tải Whisper AI model (lần đầu ~30s)...", 0.17)
             # Ưu tiên model đi kèm trong thư mục models\ (chạy OFFLINE trên máy mới,
             # không phải tải lại ~145MB); thiếu thì whisper tự tải về cache mặc định.
+            # Dò thiết bị: GPU (cuda) → phân tích nhanh 5-10s; CPU → chậm hơn nhiều
+            _dev = 'cpu'
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    _dev = 'cuda'
+            except Exception:
+                pass
             _models_dir = os.path.join(APP_DIR, "models")
             if os.path.isfile(os.path.join(_models_dir, "base.pt")):
-                self._whisper_model = stable_whisper.load_model('base', download_root=_models_dir)
+                self._whisper_model = stable_whisper.load_model('base', device=_dev, download_root=_models_dir)
             else:
-                self._whisper_model = stable_whisper.load_model('base')
+                self._whisper_model = stable_whisper.load_model('base', device=_dev)
+            if _dev == 'cuda':
+                self.log("🧠 Whisper chạy trên GPU (CUDA) — phân tích nhanh.")
+            else:
+                self.log("⚠ Whisper đang chạy trên CPU → PHÂN TÍCH CHẬM.")
+                self.log("   Nguyên nhân: PyTorch trên máy là bản CPU (thường do cài lại thư viện).")
+                self.log("   Khắc phục: chạy file  CAI_TORCH_GPU.bat  (cần GPU NVIDIA).")
         model = self._whisper_model
         
         if not silent:
@@ -5161,8 +5192,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return ['-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p']
 
     def _key_rembg(self, rgb_np):
-        """Tách nền bằng AI (rembg / U2-Net). Xử lý tốt nền ẢNH THẬT phức tạp
-        (trời, phong cảnh, nhà thờ...) và giữ nguyên áo. Trả về alpha uint8 hoặc None."""
+        """Tách nền AI (rembg / U2-Net) — NHANH & rìa MỀM kiểu CapCut.
+        Tối ưu tốc độ: chỉ suy luận trên bản THU NHỎ (≤768px) — U2-Net bên trong
+        vốn resize về 320 nên chất lượng mask gần như y hệt mà nhanh + nhẹ hơn
+        nhiều; xong upscale mask lên full-res + tinh rìa mềm. Trả alpha uint8/None."""
         try:
             from rembg import remove, new_session
         except Exception:
@@ -5171,13 +5204,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 self._rembg_warned = True
             return None
         try:
-            import numpy as np
+            import cv2, numpy as np
             from PIL import Image
             if getattr(self, '_rembg_session', None) is None:
-                # u2net_human_seg: chuyên tách NGƯỜI (giữ áo tốt nhất). Fallback dần.
+                # Giới hạn số luồng onnxruntime → tách nền KHÔNG ăn hết CPU (đỡ lag máy)
+                try:
+                    import onnxruntime as _ort
+                    _so = _ort.SessionOptions()
+                    _so.intra_op_num_threads = max(1, (os.cpu_count() or 4) // 2)
+                    _so.inter_op_num_threads = 1
+                except Exception:
+                    _so = None
+                # u2net_human_seg: chuyên tách NGƯỜI (giữ áo/tóc tốt nhất). Fallback dần.
                 for mdl in ("u2net_human_seg", "isnet-general-use", "u2net"):
                     try:
-                        self._rembg_session = new_session(mdl)
+                        self._rembg_session = (new_session(mdl, sess_options=_so)
+                                               if _so is not None else new_session(mdl))
                         self._rembg_model = mdl
                         self.log(f"🧠 rembg dùng model: {mdl}")
                         break
@@ -5186,9 +5228,39 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if getattr(self, '_rembg_session', None) is None:
                 self.log("⚠️ Không tải được model rembg (kiểm tra mạng lần đầu).")
                 return None
-            out = remove(Image.fromarray(rgb_np.astype('uint8')),
-                         session=self._rembg_session, post_process_mask=True)
-            return np.asarray(out.convert("RGBA"))[:, :, 3]
+
+            h0, w0 = rgb_np.shape[:2]
+            # Thu nhỏ về ≤768px cạnh dài để suy luận nhanh + nhẹ RAM
+            WORK = 768
+            scale = min(1.0, WORK / max(h0, w0))
+            if scale < 1.0:
+                small = cv2.resize(rgb_np.astype('uint8'),
+                                   (max(1, int(w0 * scale)), max(1, int(h0 * scale))),
+                                   interpolation=cv2.INTER_AREA)
+            else:
+                small = rgb_np.astype('uint8')
+
+            fine = bool(getattr(self, 'jesus_key_fine', False))   # bật alpha matting?
+            if fine:
+                out = remove(Image.fromarray(small), session=self._rembg_session,
+                             post_process_mask=True, alpha_matting=True,
+                             alpha_matting_foreground_threshold=240,
+                             alpha_matting_background_threshold=10,
+                             alpha_matting_erode_size=3)
+            else:
+                out = remove(Image.fromarray(small), session=self._rembg_session,
+                             post_process_mask=True)
+            a_small = np.asarray(out.convert("RGBA"))[:, :, 3]
+
+            # Upscale mask lên full-res (cubic = mượt) rồi tinh rìa mềm kiểu CapCut
+            if a_small.shape[:2] != (h0, w0):
+                alpha = cv2.resize(a_small, (w0, h0), interpolation=cv2.INTER_CUBIC)
+            else:
+                alpha = a_small
+            # Rìa mềm NHẸ (chỉ 0.8px) — mượt răng cưa nhưng KHÔNG nhòe mất nét chủ thể
+            if not fine:
+                alpha = cv2.GaussianBlur(alpha, (0, 0), 0.8)
+            return np.clip(alpha, 0, 255).astype(np.uint8)
         except Exception as e:
             self.log(f"⚠️ rembg lỗi ({e}).")
             return None
@@ -5428,8 +5500,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 return True
             except Exception:
                 return False
-        _all_cache = _bg_args_len > 24000 and n_bg > 1 and _bg_uniform()
-        if _bg_args_len > 24000 and n_bg > 1 and not _all_cache:
+        # LƯU Ý: khi n_bg > 20, đường 2-PASS chia cụm phía dưới sẽ lo (xfade trong
+        # cụm + xfade giữa các cụm) → KHÔNG gộp-copy ở đây nữa (gộp-copy sẽ giết
+        # xfade). Chỉ giữ gộp-copy cho trường hợp hiếm: ít clip (≤20) mà đường dẫn
+        # dài bất thường khiến lệnh vượt giới hạn.
+        _all_cache = _bg_args_len > 24000 and 1 < n_bg <= 20 and _bg_uniform()
+        if _bg_args_len > 24000 and 1 < n_bg <= 20 and not _all_cache:
             self.log("⚠ Lệnh dài nhưng các clip nền KHÔNG đồng nhất codec/kích thước/fps "
                      "→ không gộp copy được; sẽ render theo cụm (vẫn chạy bình thường).")
         if _all_cache:
@@ -5584,17 +5660,56 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         _results[ci] = r
 
                 if not self.cancel_render and all(_results):
-                    # Nối các cụm bằng concat demuxer + stream copy (0 giây, cùng codec)
-                    _list = os.path.join(TEMP_DIR, f"bgpre_{pm_tag}_list.txt")
-                    with open(_list, 'w', encoding='utf-8') as _lf:
-                        for r in _results:
-                            _lf.write("file '" + r.replace("'", "'\\''") + "'\n")
-                    _rc = subprocess.run(
-                        [get_ffmpeg(), '-y', '-f', 'concat', '-safe', '0', '-i', _list,
-                         '-c', 'copy', '-t', f"{main_video_dur + 1.5:.3f}", pm_out],
-                        capture_output=True, creationflags=0x08000000)
-                    if (_rc.returncode == 0 and os.path.exists(pm_out)
-                            and os.path.getsize(pm_out) > 0):
+                    _T = self.jesus_xfade_dur
+                    _merge_ok = False
+                    if _T > 0 and len(_results) > 1:
+                        # XFADE GIỮA CÁC CỤM: chỉ ~N cụm (thường <20) → lệnh NGẮN,
+                        # chạy được dù tổng clip nền bao nhiêu. Nhờ đó xfade hiện ở
+                        # MỌI mối nối (trong cụm ĐÃ có xfade + giữa cụm giờ cũng có).
+                        try:
+                            _cdurs = [self.get_audio_duration(r) for r in _results]
+                            if all(d > 0 for d in _cdurs):
+                                _in = []
+                                for r in _results:
+                                    _in += ['-i', r]
+                                _parts = []
+                                _prev = "[0:v]"; _acc = _cdurs[0]
+                                _nn = len(_results)
+                                for j in range(1, _nn):
+                                    _t = max(min(_T, min(_cdurs[j - 1], _cdurs[j]) * 0.5), 0.05)
+                                    _off = max(_acc - _t, 0.0)
+                                    _o = "[xo]" if j == _nn - 1 else f"[xf{j}]"
+                                    _parts.append(f"{_prev}[{j}:v]xfade=transition=fade:"
+                                                  f"duration={_t:.3f}:offset={_off:.3f}{_o}")
+                                    _acc += _cdurs[j] - _t; _prev = _o
+                                _fc = os.path.join(TEMP_DIR, f"bgpre_{pm_tag}_xf.txt")
+                                with open(_fc, 'w', encoding='utf-8') as _ff:
+                                    _ff.write(";".join(_parts))
+                                _enc2 = list(enc_args)
+                                if 'h264_nvenc' in _enc2:
+                                    _enc2 += ['-preset', 'p1', '-cq', '19']
+                                _rc = subprocess.run(
+                                    [get_ffmpeg(), '-y'] + _in +
+                                    ['-filter_complex_script', _fc, '-map', '[xo]']
+                                    + _enc2 + ['-t', f"{main_video_dur + 1.5:.3f}", pm_out],
+                                    capture_output=True, creationflags=0x08000000)
+                                _merge_ok = (_rc.returncode == 0 and os.path.exists(pm_out)
+                                             and os.path.getsize(pm_out) > 0)
+                        except Exception:
+                            _merge_ok = False
+                    if not _merge_ok:
+                        # Fallback (xfade tắt / lỗi): nối copy nhanh, cắt cứng giữa cụm
+                        _list = os.path.join(TEMP_DIR, f"bgpre_{pm_tag}_list.txt")
+                        with open(_list, 'w', encoding='utf-8') as _lf:
+                            for r in _results:
+                                _lf.write("file '" + r.replace("'", "'\\''") + "'\n")
+                        _rc = subprocess.run(
+                            [get_ffmpeg(), '-y', '-f', 'concat', '-safe', '0', '-i', _list,
+                             '-c', 'copy', '-t', f"{main_video_dur + 1.5:.3f}", pm_out],
+                            capture_output=True, creationflags=0x08000000)
+                        _merge_ok = (_rc.returncode == 0 and os.path.exists(pm_out)
+                                     and os.path.getsize(pm_out) > 0)
+                    if _merge_ok:
                         bg_clips = [pm_out]
                         bg_clip_durs = [main_video_dur + 1.5]
                         n_bg = 1

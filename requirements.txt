@@ -23,6 +23,9 @@ numba
 tiktoken
 
 # --- AI engine (ban CPU mac dinh tren Windows, ~500MB-2GB tai lan dau) ---
+# LUU Y: day la torch ban CPU -> phan tich kich ban (Whisper) CHAM.
+# May co GPU NVIDIA: chay  CAI_TORCH_GPU.bat  de len ban GPU (nhanh 5-10s).
+# Tinh nang tu-cap-nhat da duoc chinh de KHONG dung toi torch (giu ban GPU).
 torch
 
 # --- TUY CHON: tach nen AI (rembg). Duoc cai rieng o buoc 4 cua
